@@ -8,12 +8,16 @@ import matplotlib.pyplot as plt
 import scipy.fftpack as fftpack
 # import try_emd
 from PyEMD import EMD, EEMD, CEEMDAN
+from cross_attention import *
 
 detector = dlib.get_frontal_face_detector()  # 获取人脸分类器
 predictor = dlib.shape_predictor('/home/data/CZP/MEGC/MEGC/spot/shape_predictor_68_face_landmarks.dat')  # 获取人脸检测器
 # Dlib 检测器和预测器
 font = cv2.FONT_HERSHEY_SIMPLEX
 landmark0 = []
+
+
+
 
 
 def temporal_ideal_filter(tensor, low, high, fps, axis=0):
@@ -283,20 +287,15 @@ def adjust_intervals(intervals, data, gradient_threshold=0.3):
         if(start >197 or end < 0 or end>197):
             adjusted_intervals.append([start, end])
             continue
-
-        # 延展起始边界
         while start > 0 and gradient[start] > gradient_threshold:
             start -= 1
 
-        # 压缩起始边界
         while start < len(data) - 1 and gradient[start] < -gradient_threshold:
             start += 1
 
-        # 延展结束边界
         while end < len(data) - 1 and gradient[end] < -gradient_threshold:
             end += 1
 
-        # 压缩结束边界
         while end > 0 and gradient[end] > gradient_threshold:
             end -= 1
 
@@ -305,10 +304,68 @@ def adjust_intervals(intervals, data, gradient_threshold=0.3):
     return np.array(adjusted_intervals)
 
 
+
+class LANet(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=16, weight_path=None, device='cpu'):
+        super(LANet, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1)
+        self.conv2 = nn.Conv2d(in_channels // reduction_ratio, 1, kernel_size=1)
+        
+
+        self.load_weights(weight_path, device)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        attention_map = torch.sigmoid(self.conv2(x))
+        return attention_map
+
+    def load_weights(self, weight_path, device='gpu'):
+        state_dict = torch.load(weight_path, map_location=device)
+        self.load_state_dict(state_dict)
+
+
+def enhancementLANET(flow):
+    lanet = LANet(in_channels=2, reduction_ratio=16, weight_path=“('/home/data/CZP/MEGC/MEGC/spot/LANET/lanet_weights.pth')
+    flow_tensor = torch.from_numpy(flow).permute(2, 0, 1).unsqueeze(0)
+    b, c, h, w = flow_tensor.size()
+    regions = [
+        flow_tensor[:, :, 0:h//2, 0:w//2],  # upper-left
+        flow_tensor[:, :, 0:h//2, w//2:w],  # upper-right
+        flow_tensor[:, :, h//2:h, 0:w//2],  # lower-left
+        flow_tensor[:, :, h//2:h, w//2:w]   # lower-right
+    ]
+
+    attention_maps = []
+    for region in regions:
+        attention_map = lanet(region)
+        attention_maps.append(attention_map)
+
+    drop_idx = torch.randint(0, len(attention_maps), (1,)).item()
+    attention_maps[drop_idx] = torch.zeros_like(attention_maps[drop_idx])
+
+    
+    attention_maps_combined = torch.zeros_like(flow_tensor[:, :1, :, :])
+    offsets = [(0, 0), (0, w//2), (h//2, 0), (h//2, w//2)]
+    for i, (attention_map, (x_offset, y_offset)) in enumerate(zip(attention_maps, offsets)):
+        attention_maps_combined[:, :, x_offset:x_offset+h//2, y_offset:y_offset+w//2] = attention_map
+
+    M_out = torch.max(attention_maps_combined, dim=0, keepdim=True)[0]
+
+    enhanced_optical_flow_feature = flow_tensor * M_out
+
+    enhanced_flow = enhanced_optical_flow_feature.squeeze(0).permute(1, 2, 0).numpy()
+
+    return enhanced_flow
+
+
+
+
+
 def process(flow1_total, yuzhi1, yuzhi2, position, xuhao, k, a, totalflow):
     fs = 1
     c = 0.2
     # c2=0.1
+    flow1_total = enhancementLANET(flow1_total)
     yuzhi1 = yuzhi1 + c
     yuzhi2 = yuzhi2 + c
     flow1_total = draw_line(flow1_total)  # 作用是将光流特征转换为幅值的形式
@@ -333,8 +390,6 @@ def process(flow1_total, yuzhi1, yuzhi2, position, xuhao, k, a, totalflow):
 
     for i in range(len(flow1_total_fenxi)):
         totalflow.append(flow1_total_fenxi[i])
-
-
 
     return totalflow
 
