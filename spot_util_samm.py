@@ -356,12 +356,69 @@ def adjust_intervals(intervals, data, gradient_threshold=0.3):
     return np.array(adjusted_intervals)
 
 
+
+class LANet(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=16, weight_path=None, device='cpu'):
+        super(LANet, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1)
+        self.conv2 = nn.Conv2d(in_channels // reduction_ratio, 1, kernel_size=1)
+        
+
+        self.load_weights(weight_path, device)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        attention_map = torch.sigmoid(self.conv2(x))
+        return attention_map
+
+    def load_weights(self, weight_path, device='gpu'):
+        state_dict = torch.load(weight_path, map_location=device)
+        self.load_state_dict(state_dict)
+
+
+def enhancementLANET(flow):
+    lanet = LANet(in_channels=2, reduction_ratio=16, weight_path=“('/home/data/CZP/MEGC/MEGC/spot/LANET_samm/lanet_weights.pth')
+    flow_tensor = torch.from_numpy(flow).permute(2, 0, 1).unsqueeze(0)
+    b, c, h, w = flow_tensor.size()
+    regions = [
+        flow_tensor[:, :, 0:h//2, 0:w//2],  # upper-left
+        flow_tensor[:, :, 0:h//2, w//2:w],  # upper-right
+        flow_tensor[:, :, h//2:h, 0:w//2],  # lower-left
+        flow_tensor[:, :, h//2:h, w//2:w]   # lower-right
+    ]
+
+    attention_maps = []
+    for region in regions:
+        attention_map = lanet(region)
+        attention_maps.append(attention_map)
+
+    drop_idx = torch.randint(0, len(attention_maps), (1,)).item()
+    attention_maps[drop_idx] = torch.zeros_like(attention_maps[drop_idx])
+
+    
+    attention_maps_combined = torch.zeros_like(flow_tensor[:, :1, :, :])
+    offsets = [(0, 0), (0, w//2), (h//2, 0), (h//2, w//2)]
+    for i, (attention_map, (x_offset, y_offset)) in enumerate(zip(attention_maps, offsets)):
+        attention_maps_combined[:, :, x_offset:x_offset+h//2, y_offset:y_offset+w//2] = attention_map
+
+    M_out = torch.max(attention_maps_combined, dim=0, keepdim=True)[0]
+
+    enhanced_optical_flow_feature = flow_tensor * M_out
+
+    enhanced_flow = enhanced_optical_flow_feature.squeeze(0).permute(1, 2, 0).numpy()
+
+    return enhanced_flow
+
+
+
+
 def proce2(flow1_total,yuzhi1,yuzhi2,position,xuhao,k,a,totalflow,totalflow_mic,totalflow_mac):
     fs=1
     c1=-0.2
     yuzhi1=yuzhi1+c1
     c2=-0.1
     yuzhi2=yuzhi2+c2
+    flow1_total = enhancementLANET(flow1_total)
     flow1_total = draw_line(flow1_total)#作用是将光流特征转换为幅值的形式
     flow1_total = np.array(flow1_total)
     position=position+str(xuhao)+"----"  #
